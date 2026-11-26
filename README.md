@@ -1,6 +1,6 @@
 # Kerbwise Courier
 
-An Android courier app built with **Flutter**. It uses the calm mock API for Step 1.
+An Android courier app built with **Flutter**.
 
 For development setup and pull request guidance, see [Contributing](CONTRIBUTION.md).
 
