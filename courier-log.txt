@@ -1,0 +1,29 @@
+Courier app log (Flutter build), exported from a courier's phone
+Phone: Moto G7 Play, Android 10, 2 GB memory
+App: version 1.3.0 (build 21), installed Wednesday 11 November 2026
+Names and phone numbers are removed from this excerpt. Times are the phone's clock.
+
+2026-11-12 08:02:44 INFO  start; cached list found (25 items, saved 2026-11-11 17:41)
+2026-11-12 08:02:46 INFO  GET /deliveries?limit=50&page=1 -> 200 (25 items, ids 1-25)
+2026-11-12 08:02:46 INFO  showing 25 deliveries
+2026-11-12 11:40:12 INFO  POST /deliveries/9/complete -> 200
+2026-11-12 14:58:09 INFO  GET /deliveries?limit=50&page=1 -> 200 (25 items, ids 10-34)
+2026-11-12 14:58:09 INFO  showing 25 deliveries
+2026-11-12 15:07:30 INFO  GET /deliveries?limit=50&page=1 -> 200 (25 items, ids 31-55)
+2026-11-12 15:07:31 ERROR list failed: type 'String' is not a subtype of type 'double' in type cast
+    #0      new Delivery.fromJson (package:courier/api.dart:17:20)
+    #1      fetchDeliveries.<anonymous closure> (package:courier/api.dart:29:50)
+    #2      MappedListIterable.elementAt (dart:_internal/iterable.dart:411:31)
+2026-11-12 15:07:31 INFO  state: error; list cleared
+2026-11-12 15:07:48 INFO  GET /deliveries?limit=50&page=1 -> 200 (25 items, ids 31-55)
+2026-11-12 15:07:48 ERROR list failed: type 'String' is not a subtype of type 'double' in type cast
+2026-11-12 15:09:02 WARN  no network (SocketException: Failed host lookup)
+2026-11-12 15:09:02 INFO  state: error; list cleared
+2026-11-12 15:12:20 INFO  POST /deliveries/33/complete -> no answer after 30s
+2026-11-12 15:12:21 INFO  POST /deliveries/33/complete (try 2) -> 409
+2026-11-12 15:12:21 INFO  POST /deliveries/33/complete (try 3) -> 409
+2026-11-12 15:12:22 INFO  POST /deliveries/33/complete (try 4) -> 409
+2026-11-12 15:12:22 INFO  POST /deliveries/33/complete (try 5) -> 409
+2026-11-12 15:12:22 INFO  delivery 33 removed from the screen
+2026-11-12 15:12:22 WARN  showing message: Error
+2026-11-12 15:20:05 INFO  start; no cached list used
