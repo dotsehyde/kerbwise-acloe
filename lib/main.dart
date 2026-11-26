@@ -1,9 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 
-import 'courier_api.dart';
-import 'courier_theme.dart';
-import 'deliveries_screen.dart';
+import 'core/theme/courier_theme.dart';
+import 'pages/home_screen.dart';
+import 'services/courier_api.dart';
 
 void main() => runApp(const CourierApp());
 
@@ -36,6 +36,6 @@ class _CourierAppState extends State<CourierApp> {
     title: 'Kerbwise Courier',
     debugShowCheckedModeBanner: false,
     theme: courierTheme(),
-    home: DeliveriesScreen(api: _api),
+    home: HomeScreen(api: _api),
   );
 }

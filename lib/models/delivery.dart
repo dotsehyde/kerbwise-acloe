@@ -1,5 +1,4 @@
-import 'package:timezone/data/latest_10y.dart' as tz_data;
-import 'package:timezone/timezone.dart' as tz;
+import '../core/utils/gbp.dart';
 
 enum DeliveryStatus {
   assigned('Assigned'),
@@ -88,30 +87,12 @@ class DeliveryDetails {
   final String phone;
   final int cashDue;
   final String notes;
-}
 
-int poundsToPence(num pounds) => (pounds * 100).round();
-
-String formatGbp(int pence) =>
-    '£${pence ~/ 100}.${(pence % 100).toString().padLeft(2, '0')}';
-
-final _cashPattern = RegExp(r'^([0-9]{1,9})(?:[.,]([0-9]{1,2}))?$');
-
-int? parseCashPence(String input) {
-  final match = _cashPattern.firstMatch(input.trim());
-  if (match == null) return null;
-  final pounds = int.parse(match[1]!);
-  final pence = int.parse((match[2] ?? '').padRight(2, '0'));
-  return pounds * 100 + pence;
-}
-
-final _london = (() {
-  tz_data.initializeTimeZones();
-  return tz.getLocation('Europe/London');
-})();
-
-String londonTime(DateTime time) {
-  final london = tz.TZDateTime.from(time, _london);
-  return '${london.hour.toString().padLeft(2, '0')}:'
-      '${london.minute.toString().padLeft(2, '0')}';
+  DeliveryDetails copyWith({Delivery? delivery, int? cashDue}) =>
+      DeliveryDetails(
+        delivery: delivery ?? this.delivery,
+        phone: phone,
+        cashDue: cashDue ?? this.cashDue,
+        notes: notes,
+      );
 }

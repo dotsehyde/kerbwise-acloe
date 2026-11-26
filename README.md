@@ -10,19 +10,28 @@ For development setup and pull request guidance, see [Contributing](CONTRIBUTION
 | :---: | :---: | :---: |
 | [<img src="screenshot/home.png" width="220" alt="Today’s delivery list with progress for all 60 deliveries">](screenshot/home.png) | [<img src="screenshot/delivery-details.png" width="220" alt="Delivery details showing the address, call button, due time, and cash to collect">](screenshot/delivery-details.png) | [<img src="screenshot/cash-validation.png" width="220" alt="Cash validation message showing the exact amount required to complete the delivery">](screenshot/cash-validation.png) |
 
-## Start the API
-
-Install Node.js 18+ and Flutter 3.44+ with the Android SDK, Android platform tools (`adb`), and JDK 17. Run `flutter doctor` to check the Android toolchain. Open a terminal at this project’s root and leave this command running.
+## Clone the repository
 
 ```sh
+git clone https://github.com/dotsehyde/kerbwise-acloe.git
+cd kerbwise-acloe
+```
+
+## Set up and start the API
+
+Install Node.js 18+ and Flutter 3.44+ with the Android SDK, Android platform tools (`adb`), and JDK 17. From the repository directory, check your toolchain, install the Flutter dependencies, and start the calm mock API.
+
+```sh
+flutter doctor
+flutter pub get
 node courier-server.js
 ```
 
-The API listens on port 4000. Restarting it resets the deliveries.
+Leave this terminal running. The API listens on port 4000. Restarting it resets the deliveries.
 
 ## Run on Android
 
-Run `flutter pub get` from the project root. Start an Android Studio emulator, or connect an Android phone by USB with USB debugging enabled and accept the debugging prompt. Check the device ID with `flutter devices`.
+Open a second terminal in the `kerbwise-acloe` directory. Start an Android Studio emulator or connect a phone over USB. For a phone, enable USB debugging and accept the debugging prompt. Find your device ID with `flutter devices`.
 
 **Android Studio emulator**
 
@@ -50,6 +59,34 @@ Replace `PHONE_ID` with the connected phone’s ID. Keep the USB connection acti
 
 The list uses the API’s run for today and displays due times in London time. Completion needs a connection in Step 1. If a request loses its response, tapping **Mark delivered** again in the same app session reuses the idempotency key for the same amount. Customer details are held in memory during use.
 
+## Project structure
+
+The Flutter app follows Model–View–Controller (MVC).
+
+```text
+lib/
+├── main.dart                            # App entry point and API configuration
+├── models/
+│   └── delivery.dart                    # Delivery data and JSON parsing
+├── pages/
+│   ├── home_screen.dart                 # Today’s list and delivery progress
+│   └── delivery_detail_screen.dart      # Address, customer call, and handover
+├── controllers/
+│   ├── home_controller.dart             # List loading and delivery status updates
+│   └── delivery_detail_controller.dart  # Detail loading, cash validation, and completion
+├── services/
+│   ├── courier_api.dart                 # HTTP requests, pagination, and idempotency
+│   └── customer_dialer.dart             # Opens the Android dialer
+└── core/
+    ├── theme/                           # Colors and Material theme
+    ├── shared/                          # Reusable screen messages
+    └── utils/                           # GBP and London time formatting
+```
+
+The pages rebuild when their controllers publish state changes. When the API confirms a handover, the detail page reports the updated delivery to the home controller, which updates the row and progress count.
+
+The Android host project lives in `android/`. The calm mock runs from `courier-server.js`, and its endpoints and response formats are documented in the [Courier API notes](docs/courier-api-notes.md).
+
 ## Run the checks
 
 ```sh
@@ -57,4 +94,4 @@ flutter analyze
 flutter test
 ```
 
-The widget tests use a mock HTTP client, so the server and emulator can stay off for these checks.
+The [widget tests](test/courier_app_test.dart) cover pagination, cash and prepaid completion, duplicate taps, and retry behavior. They use a mock HTTP client, so the server and emulator can stay off for these checks.

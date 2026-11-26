@@ -1,48 +1,37 @@
 import 'package:flutter/material.dart';
 
-import 'courier_api.dart';
-import 'courier_theme.dart';
-import 'delivery.dart';
-import 'delivery_screen.dart';
+import '../controllers/home_controller.dart';
+import '../core/shared/screen_message.dart';
+import '../core/theme/courier_theme.dart';
+import '../core/utils/gbp.dart';
+import '../core/utils/london_time.dart';
+import '../models/delivery.dart';
+import '../services/courier_api.dart';
+import 'delivery_detail_screen.dart';
 
-class DeliveriesScreen extends StatefulWidget {
-  const DeliveriesScreen({super.key, required this.api});
+class HomeScreen extends StatefulWidget {
+  const HomeScreen({super.key, required this.api});
 
   final CourierApi api;
 
   @override
-  State<DeliveriesScreen> createState() => _DeliveriesScreenState();
+  State<HomeScreen> createState() => _HomeScreenState();
 }
 
-class _DeliveriesScreenState extends State<DeliveriesScreen> {
-  List<Delivery>? _deliveries;
-  bool _loading = true;
+class _HomeScreenState extends State<HomeScreen> {
+  late final HomeController _controller;
   bool _openingDelivery = false;
 
   @override
   void initState() {
     super.initState();
-    _fetchDeliveries();
+    _controller = HomeController(widget.api)..loadDeliveries();
   }
 
-  Future<void> _fetchDeliveries() async {
-    List<Delivery>? deliveries;
-    try {
-      deliveries = await widget.api.fetchDeliveries();
-    } catch (_) {
-      // A failed page leaves the route incomplete. Offer a full retry.
-    }
-    if (!mounted) return;
-    setState(() {
-      _deliveries = deliveries;
-      _loading = false;
-    });
-  }
-
-  Future<void> _refresh() async {
-    if (_loading) return;
-    setState(() => _loading = true);
-    await _fetchDeliveries();
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
   }
 
   Future<void> _openDelivery(Delivery delivery) async {
@@ -51,18 +40,10 @@ class _DeliveriesScreenState extends State<DeliveriesScreen> {
     try {
       await Navigator.of(context).push<void>(
         MaterialPageRoute(
-          builder: (_) => DeliveryScreen(
+          builder: (_) => DeliveryDetailScreen(
             api: widget.api,
             id: delivery.id,
-            onChange: (updated) {
-              if (!mounted) return;
-              setState(() {
-                _deliveries = [
-                  for (final item in _deliveries!)
-                    item.id == updated.id ? updated : item,
-                ];
-              });
-            },
+            onChange: _controller.updateDelivery,
           ),
         ),
       );
@@ -72,7 +53,12 @@ class _DeliveriesScreenState extends State<DeliveriesScreen> {
   }
 
   @override
-  Widget build(BuildContext context) => Scaffold(
+  Widget build(BuildContext context) => ListenableBuilder(
+    listenable: _controller,
+    builder: (_, _) => _buildScreen(),
+  );
+
+  Widget _buildScreen() => Scaffold(
     appBar: AppBar(
       title: Row(
         children: [
@@ -102,28 +88,28 @@ class _DeliveriesScreenState extends State<DeliveriesScreen> {
         IconButton(
           icon: const Icon(Icons.refresh_rounded),
           tooltip: 'Refresh deliveries',
-          onPressed: _loading ? null : _refresh,
+          onPressed: _controller.isLoading ? null : _controller.loadDeliveries,
         ),
         const SizedBox(width: 8),
       ],
     ),
-    body: SafeArea(top: false, child: _buildBody(context)),
+    body: SafeArea(top: false, child: _buildBody()),
   );
 
-  Widget _buildBody(BuildContext context) {
-    if (_loading) {
+  Widget _buildBody() {
+    if (_controller.isLoading) {
       return const Center(
         child: CircularProgressIndicator(semanticsLabel: 'Loading deliveries'),
       );
     }
 
-    final deliveries = _deliveries;
+    final deliveries = _controller.deliveries;
     if (deliveries == null) {
       return ScreenMessage(
         icon: Icons.cloud_off_outlined,
         title: 'Couldn’t load deliveries',
         description: 'Check your connection and try again.',
-        retry: _refresh,
+        retry: _controller.loadDeliveries,
       );
     }
 
@@ -131,7 +117,7 @@ class _DeliveriesScreenState extends State<DeliveriesScreen> {
       return ScreenMessage(
         icon: Icons.inventory_2_outlined,
         title: 'No deliveries today',
-        retry: _refresh,
+        retry: _controller.loadDeliveries,
       );
     }
 

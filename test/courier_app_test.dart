@@ -5,11 +5,11 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
-import 'package:kerbwise_courier/courier_api.dart';
-import 'package:kerbwise_courier/courier_theme.dart';
-import 'package:kerbwise_courier/deliveries_screen.dart';
-import 'package:kerbwise_courier/delivery.dart';
-import 'package:kerbwise_courier/delivery_screen.dart';
+import 'package:kerbwise_courier/core/theme/courier_theme.dart';
+import 'package:kerbwise_courier/models/delivery.dart';
+import 'package:kerbwise_courier/pages/delivery_detail_screen.dart';
+import 'package:kerbwise_courier/pages/home_screen.dart';
+import 'package:kerbwise_courier/services/courier_api.dart';
 
 void main() {
   final markDelivered = find.text('Mark delivered');
@@ -191,7 +191,7 @@ void main() {
       });
     });
 
-    await tester.pumpWidget(_app(DeliveriesScreen(api: api)));
+    await tester.pumpWidget(_app(HomeScreen(api: api)));
     await tester.pumpAndSettle();
 
     expect(seen, [null, '25', '50']);
@@ -229,7 +229,7 @@ void main() {
       return _response({'items': [], 'next': null});
     });
 
-    await tester.pumpWidget(_app(DeliveriesScreen(api: api)));
+    await tester.pumpWidget(_app(HomeScreen(api: api)));
     expect(find.byType(CircularProgressIndicator), findsOneWidget);
     pending.complete(_response({}, 503));
     await tester.pumpAndSettle();
@@ -237,6 +237,35 @@ void main() {
     await tester.tap(find.text('Try again'));
     await tester.pumpAndSettle();
     expect(find.text('No deliveries today'), findsOneWidget);
+  });
+
+  testWidgets('Delivery detail can retry a failed load', (tester) async {
+    final pending = Completer<http.Response>();
+    final changes = <Delivery>[];
+    var requests = 0;
+    final api = _mockApi((request) async {
+      expect(request.url.path, '/deliveries/11');
+      requests++;
+      return requests == 1
+          ? pending.future
+          : _response(_delivery(11, cash: true));
+    });
+
+    await tester.pumpWidget(
+      _app(DeliveryDetailScreen(api: api, id: 11, onChange: changes.add)),
+    );
+    expect(find.byType(CircularProgressIndicator), findsOneWidget);
+    pending.complete(_response({}, 503));
+    await tester.pumpAndSettle();
+    expect(find.text('Couldn’t load delivery'), findsOneWidget);
+    expect(changes, isEmpty);
+
+    await tester.tap(find.text('Try again'));
+    await tester.pumpAndSettle();
+    expect(requests, 2);
+    expect(changes.single.id, 11);
+    expect(find.text('11 Test Street'), findsOneWidget);
+    expect(markDelivered, findsOneWidget);
   });
 }
 
@@ -252,7 +281,7 @@ Future<void> _openDelivery(
   });
 
   await tester.pumpWidget(
-    _app(DeliveryScreen(api: api, id: 11, onChange: onChange ?? (_) {})),
+    _app(DeliveryDetailScreen(api: api, id: 11, onChange: onChange ?? (_) {})),
   );
   await tester.pumpAndSettle();
 }
