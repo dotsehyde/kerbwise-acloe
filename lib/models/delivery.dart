@@ -1,10 +1,12 @@
-import 'package:timezone/data/latest_10y.dart' as tz_data;
-import 'package:timezone/timezone.dart' as tz;
+import '../core/utils/gbp.dart';
+import '../core/utils/london_time.dart';
 
 enum DeliveryStatus {
   assigned('Assigned'),
   out('Out for delivery'),
-  delivered('Delivered');
+  delivered('Delivered'),
+  failed('Failed'),
+  unknown('Status unavailable');
 
   const DeliveryStatus(this.label);
 
@@ -23,6 +25,7 @@ class Delivery {
     required this.orderTotal,
     required this.status,
     required this.scheduledAt,
+    this.phone,
   });
 
   factory Delivery.fromJson(Map<String, dynamic> json) {
@@ -34,10 +37,21 @@ class Delivery {
       area: address['area'] as String,
       landmark: address['landmark'] as String?,
       itemCount: json['items'] as int,
-      cashOnDelivery: json['paymentMode'] == 'cash',
-      orderTotal: poundsToPence(json['amount'] as num),
-      status: DeliveryStatus.values.byName(json['status'] as String),
-      scheduledAt: DateTime.parse(json['scheduledAt'] as String),
+      cashOnDelivery: switch ((json['currency'], json['paymentMode'])) {
+        ('GBP', 'cash') => true,
+        ('GBP', 'paid') => false,
+        _ => null,
+      },
+      orderTotal: poundsToPence(json['amount']),
+      status: switch (json['status']) {
+        'assigned' => DeliveryStatus.assigned,
+        'out' => DeliveryStatus.out,
+        'delivered' => DeliveryStatus.delivered,
+        'failed' => DeliveryStatus.failed,
+        _ => DeliveryStatus.unknown,
+      },
+      scheduledAt: parseDeliveryTime(json['scheduledAt']),
+      phone: _phoneFromJson(json['phone']),
     );
   }
 
@@ -47,12 +61,15 @@ class Delivery {
   final String area;
   final String? landmark;
   final int itemCount;
-  final bool cashOnDelivery;
-  final int orderTotal;
+  final bool? cashOnDelivery;
+  final int? orderTotal;
   final DeliveryStatus status;
-  final DateTime scheduledAt;
+  final DateTime? scheduledAt;
+  final String? phone;
 
   bool get isDelivered => status == DeliveryStatus.delivered;
+  bool get canComplete =>
+      status == DeliveryStatus.assigned || status == DeliveryStatus.out;
 
   Delivery asDelivered() => Delivery(
     id: id,
@@ -65,13 +82,13 @@ class Delivery {
     orderTotal: orderTotal,
     status: DeliveryStatus.delivered,
     scheduledAt: scheduledAt,
+    phone: phone,
   );
 }
 
 class DeliveryDetails {
   const DeliveryDetails({
     required this.delivery,
-    required this.phone,
     required this.cashDue,
     required this.notes,
   });
@@ -79,39 +96,36 @@ class DeliveryDetails {
   factory DeliveryDetails.fromJson(Map<String, dynamic> json) =>
       DeliveryDetails(
         delivery: Delivery.fromJson(json),
-        phone: json['phone'] as String,
-        cashDue: poundsToPence(json['cashDue'] as num),
+        cashDue: poundsToPence(json['cashDue']),
         notes: (json['notes'] as String?)?.trim() ?? '',
       );
 
   final Delivery delivery;
-  final String phone;
-  final int cashDue;
+  factory DeliveryDetails.fromSummary(Delivery delivery) => DeliveryDetails(
+    delivery: delivery,
+    cashDue: switch (delivery.cashOnDelivery) {
+      true => delivery.orderTotal,
+      false => 0,
+      null => null,
+    },
+    notes: '',
+  );
+
+  final int? cashDue;
   final String notes;
+
+  bool get hasVerifiedPayment => switch (delivery.cashOnDelivery) {
+    true => cashDue != null,
+    false => cashDue == 0,
+    null => false,
+  };
+
+  DeliveryDetails copyWith({Delivery? delivery, int? cashDue}) =>
+      DeliveryDetails(
+        delivery: delivery ?? this.delivery,
+        cashDue: cashDue ?? this.cashDue,
+        notes: notes,
+      );
 }
 
-int poundsToPence(num pounds) => (pounds * 100).round();
-
-String formatGbp(int pence) =>
-    '£${pence ~/ 100}.${(pence % 100).toString().padLeft(2, '0')}';
-
-final _cashPattern = RegExp(r'^([0-9]{1,9})(?:[.,]([0-9]{1,2}))?$');
-
-int? parseCashPence(String input) {
-  final match = _cashPattern.firstMatch(input.trim());
-  if (match == null) return null;
-  final pounds = int.parse(match[1]!);
-  final pence = int.parse((match[2] ?? '').padRight(2, '0'));
-  return pounds * 100 + pence;
-}
-
-final _london = (() {
-  tz_data.initializeTimeZones();
-  return tz.getLocation('Europe/London');
-})();
-
-String londonTime(DateTime time) {
-  final london = tz.TZDateTime.from(time, _london);
-  return '${london.hour.toString().padLeft(2, '0')}:'
-      '${london.minute.toString().padLeft(2, '0')}';
-}
+String? _phoneFromJson(Object? value) => value is String ? value.trim() : null;

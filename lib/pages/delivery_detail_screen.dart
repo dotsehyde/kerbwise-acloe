@@ -1,64 +1,69 @@
 import 'package:flutter/material.dart';
-import 'package:url_launcher/url_launcher.dart';
 
-import 'courier_api.dart';
-import 'courier_theme.dart';
-import 'delivery.dart';
+import '../controllers/delivery_detail_controller.dart';
+import '../core/shared/screen_message.dart';
+import '../core/theme/courier_theme.dart';
+import '../core/utils/gbp.dart';
+import '../core/utils/london_time.dart';
+import '../models/delivery.dart';
+import '../services/completion_queue.dart';
+import '../services/courier_api.dart';
+import '../services/customer_dialer.dart';
 
-class DeliveryScreen extends StatefulWidget {
-  const DeliveryScreen({
+class DeliveryDetailScreen extends StatefulWidget {
+  const DeliveryDetailScreen({
     super.key,
     required this.api,
+    required this.queue,
     required this.id,
     required this.onChange,
+    this.summary,
   });
 
   final CourierApi api;
+  final CompletionQueue queue;
   final int id;
   final ValueChanged<Delivery> onChange;
+  final Delivery? summary;
 
   @override
-  State<DeliveryScreen> createState() => _DeliveryScreenState();
+  State<DeliveryDetailScreen> createState() => _DeliveryDetailScreenState();
 }
 
-class _DeliveryScreenState extends State<DeliveryScreen> {
-  late Future<DeliveryDetails> _details;
+class _DeliveryDetailScreenState extends State<DeliveryDetailScreen> {
+  late final DeliveryDetailController _controller;
   final _cash = TextEditingController();
   final _cashFocus = FocusNode();
   final _cashField = GlobalKey();
-  Delivery? _completed;
-  bool _submitting = false;
-  int? _updatedCashDue;
-  String? _cashError;
-  String? _submitError;
 
   @override
   void initState() {
     super.initState();
-    _details = _fetchDetails();
-  }
-
-  Future<DeliveryDetails> _fetchDetails() async {
-    final details = await widget.api.fetchDelivery(widget.id);
-    if (mounted) widget.onChange(details.delivery);
-    return details;
+    _controller = DeliveryDetailController(
+      api: widget.api,
+      queue: widget.queue,
+      id: widget.id,
+      onChange: widget.onChange,
+      summary: widget.summary,
+    )..loadDelivery();
   }
 
   @override
   void dispose() {
+    _controller.dispose();
     _cash.dispose();
     _cashFocus.dispose();
     super.dispose();
   }
 
-  int _cashDue(DeliveryDetails details) => _updatedCashDue ?? details.cashDue;
+  Future<void> _markDelivered() async {
+    if (_controller.isSubmitting) return;
 
-  void _showCashError(int due, {bool updateCashDue = false}) {
-    setState(() {
-      if (updateCashDue) _updatedCashDue = due;
-      _cashError = 'Enter ${formatGbp(due)} to match the cash due.';
-      _submitError = null;
-    });
+    final attempt = _controller.markDelivered(_cash.text);
+    if (_controller.isSubmitting) _cashFocus.unfocus();
+    await attempt;
+
+    if (!mounted || _controller.cashError == null) return;
     _cashFocus.requestFocus();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (_cashField.currentContext case final BuildContext field) {
@@ -70,119 +75,68 @@ class _DeliveryScreenState extends State<DeliveryScreen> {
     });
   }
 
-  Future<void> _markDelivered(DeliveryDetails details) async {
-    if (_submitting || _completed != null || details.delivery.isDelivered) {
-      return;
-    }
-
-    final cashPence = details.delivery.cashOnDelivery
-        ? parseCashPence(_cash.text)
-        : 0;
-    final due = _cashDue(details);
-    if (cashPence == null || cashPence != due) {
-      _showCashError(due);
-      return;
-    }
-
-    _cashFocus.unfocus();
-    setState(() {
-      _submitting = true;
-      _cashError = null;
-      _submitError = null;
-    });
-
-    try {
-      await widget.api.complete(widget.id, cashPence: cashPence);
-      if (!mounted) return;
-      final delivered = details.delivery.asDelivered();
-      setState(() => _completed = delivered);
-      widget.onChange(delivered);
-    } on CourierApiException catch (error) {
-      if (!mounted) return;
-      final expected = error.expectedCashPence;
-      if (expected != null && details.delivery.cashOnDelivery) {
-        _showCashError(expected, updateCashDue: true);
-      } else {
-        setState(() {
-          _submitError = switch (error.statusCode) {
-            404 => 'This delivery is no longer available.',
-            409 => 'This delivery has changed. Go back and reopen it.',
-            429 => 'Too many requests. Wait a moment and try again.',
-            _ => 'Couldn’t save this delivery. Try again.',
-          };
-        });
-      }
-    } catch (_) {
-      if (!mounted) return;
-      setState(() {
-        _submitError =
-            'Couldn’t confirm delivery. Check your signal and try again.';
-      });
-    } finally {
-      if (mounted) setState(() => _submitting = false);
-    }
-  }
-
   Future<void> _callCustomer(String phone) async {
-    try {
-      if (await launchUrl(
-        Uri(scheme: 'tel', path: phone),
-        mode: LaunchMode.externalApplication,
-      )) {
-        return;
-      }
-    } catch (_) {
-      // An emulator or a device without a dialer may reject the intent.
-    }
-    if (!mounted) return;
+    final opened = await openCustomerDialer(phone);
+    if (opened || !mounted) return;
+
     ScaffoldMessenger.of(context).showSnackBar(
       const SnackBar(content: Text('Couldn’t open the phone dialer.')),
     );
   }
 
   @override
-  Widget build(BuildContext context) => PopScope(
-    canPop: !_submitting,
-    child: Scaffold(
-      appBar: AppBar(title: Text('Delivery #${widget.id}')),
-      body: SafeArea(
-        top: false,
-        child: FutureBuilder<DeliveryDetails>(
-          future: _details,
-          builder: (context, snapshot) {
-            if (snapshot.connectionState != ConnectionState.done) {
-              return const Center(
-                child: CircularProgressIndicator(
-                  semanticsLabel: 'Loading delivery',
-                ),
-              );
-            }
-            final details = snapshot.data;
-            if (details == null) {
-              final error = snapshot.error;
-              if (error is CourierApiException && error.statusCode == 404) {
-                return const ScreenMessage(
-                  icon: Icons.inventory_2_outlined,
-                  title: 'Delivery unavailable',
-                  description: 'Go back and refresh your deliveries.',
-                );
-              }
-              return ScreenMessage(
-                icon: Icons.cloud_off_outlined,
-                title: 'Couldn’t load delivery',
-                description: 'Check your connection and try again.',
-                retry: () => setState(() => _details = _fetchDetails()),
-              );
-            }
-            return _buildDelivery(details);
-          },
-        ),
+  Widget build(BuildContext context) => ListenableBuilder(
+    listenable: _controller,
+    builder: (_, _) => PopScope(
+      canPop: !_controller.isSubmitting,
+      child: Scaffold(
+        appBar: AppBar(title: Text('Delivery #${widget.id}')),
+        body: SafeArea(top: false, child: _buildBody()),
       ),
     ),
   );
 
+  Widget _buildBody() {
+    if (_controller.isLoading) {
+      return const Center(
+        child: CircularProgressIndicator(semanticsLabel: 'Loading delivery'),
+      );
+    }
+
+    final details = _controller.details;
+    if (details != null) return _buildDelivery(details);
+    if (_controller.completion != null || _controller.isConfirmed) {
+      return ScreenMessage(
+        icon: Icons.inventory_2_outlined,
+        title: _controller.isConfirmed
+            ? 'Delivery completed'
+            : 'Saved handover',
+        description: _completionMessage(),
+      );
+    }
+    if (_controller.isUnavailable) {
+      return const ScreenMessage(
+        icon: Icons.inventory_2_outlined,
+        title: 'Delivery unavailable',
+        description: 'Go back and refresh your deliveries.',
+      );
+    }
+    return ScreenMessage(
+      icon: Icons.cloud_off_outlined,
+      title: 'Couldn’t load delivery',
+      description: 'Check your connection and try again.',
+      retry: _controller.loadDelivery,
+    );
+  }
+
   Widget _buildDelivery(DeliveryDetails details) {
-    final delivery = _completed ?? details.delivery;
+    final delivery = details.delivery;
+    final completion = _controller.completion;
+    final statusLabel = completion == null
+        ? delivery.status.label
+        : completion.needsReview
+        ? 'Needs review'
+        : 'Waiting to sync';
     return Column(
       children: [
         Expanded(
@@ -192,13 +146,20 @@ class _DeliveryScreenState extends State<DeliveryScreen> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
+                if (_controller.isCached)
+                  const Padding(
+                    padding: EdgeInsets.only(bottom: 10),
+                    child: Text('Showing the last available details.'),
+                  ),
                 _DetailPanel(
                   children: [
                     Align(
                       alignment: AlignmentDirectional.centerStart,
                       child: DecoratedBox(
                         decoration: BoxDecoration(
-                          color: delivery.isDelivered ? softGreen : lime,
+                          color: delivery.isDelivered && completion == null
+                              ? softGreen
+                              : lime,
                           borderRadius: BorderRadius.circular(8),
                         ),
                         child: Padding(
@@ -207,7 +168,7 @@ class _DeliveryScreenState extends State<DeliveryScreen> {
                             vertical: 5,
                           ),
                           child: Text(
-                            delivery.status.label,
+                            statusLabel,
                             style: const TextStyle(fontWeight: FontWeight.w700),
                           ),
                         ),
@@ -252,11 +213,15 @@ class _DeliveryScreenState extends State<DeliveryScreen> {
                       ),
                     ),
                     const SizedBox(height: 14),
-                    OutlinedButton.icon(
-                      onPressed: () => _callCustomer(details.phone),
-                      icon: const Icon(Icons.phone_outlined),
-                      label: const Text('Call customer'),
-                    ),
+                    if (delivery.phone case final String phone
+                        when phone.isNotEmpty)
+                      OutlinedButton.icon(
+                        onPressed: () => _callCustomer(phone),
+                        icon: const Icon(Icons.phone_outlined),
+                        label: const Text('Call customer'),
+                      )
+                    else
+                      const Text('Customer phone number unavailable'),
                   ],
                 ),
                 const SizedBox(height: 10),
@@ -265,7 +230,7 @@ class _DeliveryScreenState extends State<DeliveryScreen> {
                     _IconText(
                       icon: Icons.schedule_outlined,
                       child: Text(
-                        'Due ${londonTime(delivery.scheduledAt)} London time',
+                        _dueLabel(delivery.scheduledAt),
                         style: const TextStyle(fontWeight: FontWeight.w700),
                       ),
                     ),
@@ -293,47 +258,47 @@ class _DeliveryScreenState extends State<DeliveryScreen> {
                     Semantics(
                       header: true,
                       child: Text(
-                        delivery.cashOnDelivery
-                            ? (delivery.isDelivered
-                                  ? 'Cash amount'
-                                  : 'Cash to collect')
-                            : 'Paid online',
+                        switch (delivery.cashOnDelivery) {
+                          true =>
+                            delivery.isDelivered
+                                ? 'Cash amount'
+                                : 'Cash to collect',
+                          false => 'Paid online',
+                          null => 'Payment details unavailable',
+                        },
                         style: const TextStyle(
                           fontSize: 17,
                           fontWeight: FontWeight.w800,
                         ),
                       ),
                     ),
-                    if (delivery.cashOnDelivery) ...[
+                    if (details.cashDue case final int cashDue
+                        when delivery.cashOnDelivery == true) ...[
                       Text(
-                        formatGbp(_cashDue(details)),
+                        formatGbp(cashDue),
                         style: const TextStyle(
                           fontSize: 24,
                           color: forest,
                           fontWeight: FontWeight.w800,
                         ),
                       ),
-                      if (!delivery.isDelivered) ...[
+                      if (_controller.canMarkDelivered) ...[
                         const SizedBox(height: 12),
                         TextField(
                           key: _cashField,
                           controller: _cash,
                           focusNode: _cashFocus,
-                          enabled: !_submitting,
+                          enabled: !_controller.isSubmitting,
                           keyboardType: const TextInputType.numberWithOptions(
                             decimal: true,
                           ),
                           textInputAction: TextInputAction.done,
-                          onChanged: (_) {
-                            if (_cashError != null) {
-                              setState(() => _cashError = null);
-                            }
-                          },
+                          onChanged: (_) => _controller.clearCashError(),
                           decoration: InputDecoration(
                             labelText: 'Cash received',
                             prefixText: '£ ',
                             border: const OutlineInputBorder(),
-                            errorText: _cashError,
+                            errorText: _controller.cashError,
                             errorMaxLines: 4,
                           ),
                         ),
@@ -352,54 +317,81 @@ class _DeliveryScreenState extends State<DeliveryScreen> {
           ),
           padding: const EdgeInsets.fromLTRB(16, 10, 16, 12),
           width: double.infinity,
-          child: delivery.isDelivered
-              ? Semantics(
-                  liveRegion: true,
-                  child: const Padding(
-                    padding: EdgeInsets.symmetric(vertical: 8),
-                    child: Text(
-                      'Delivery completed',
-                      textAlign: TextAlign.center,
-                      style: TextStyle(
-                        color: forest,
-                        fontSize: 16,
-                        fontWeight: FontWeight.w800,
-                      ),
-                    ),
-                  ),
-                )
-              : Column(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    if (_submitError case final String error)
-                      Semantics(
-                        liveRegion: true,
-                        child: Padding(
-                          padding: const EdgeInsets.only(bottom: 8),
-                          child: Text(
-                            error,
-                            style: TextStyle(
-                              color: Theme.of(context).colorScheme.error,
-                            ),
-                          ),
-                        ),
-                      ),
-                    FilledButton.icon(
-                      onPressed: _submitting
-                          ? null
-                          : () => _markDelivered(details),
-                      icon: _submitting
-                          ? const SizedBox.square(
-                              dimension: 17,
-                              child: CircularProgressIndicator(strokeWidth: 2),
-                            )
-                          : const Icon(Icons.check_rounded),
-                      label: Text(_submitting ? 'Saving…' : 'Mark delivered'),
-                    ),
-                  ],
-                ),
+          child: _buildCompletion(details),
         ),
+      ],
+    );
+  }
+
+  String _dueLabel(DateTime? time) {
+    if (time == null) return 'Due time unavailable';
+    final now = _controller.serverNow;
+    final date = now != null && londonDay(now) != londonDay(time)
+        ? '${londonDate(time)}, '
+        : '';
+    return 'Due $date${londonTime(time)} London time';
+  }
+
+  String? _completionMessage() {
+    final completion = _controller.completion;
+    if (completion == null) return null;
+    if (!completion.needsReview) {
+      return 'Saved on this phone. Waiting to sync.';
+    }
+
+    final cash = formatGbp(completion.cashPence);
+    return '${completion.reviewReason} Recorded cash $cash.';
+  }
+
+  Widget _buildCompletion(DeliveryDetails details) {
+    final delivery = details.delivery;
+    final message =
+        _controller.submitError ??
+        _completionMessage() ??
+        (delivery.isDelivered
+            ? 'Delivery completed'
+            : !delivery.canComplete
+            ? 'Contact the office about this delivery.'
+            : !details.hasVerifiedPayment
+            ? 'Payment could not be verified. Contact the office.'
+            : null);
+
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        if (message != null)
+          Semantics(
+            liveRegion: true,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(vertical: 8),
+              child: Text(
+                message,
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                  color:
+                      _controller.completion?.needsReview == true ||
+                          _controller.submitError != null
+                      ? Theme.of(context).colorScheme.error
+                      : forest,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+            ),
+          ),
+        if (_controller.canMarkDelivered)
+          FilledButton.icon(
+            onPressed: _controller.isSubmitting ? null : _markDelivered,
+            icon: _controller.isSubmitting
+                ? const SizedBox.square(
+                    dimension: 17,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  )
+                : const Icon(Icons.check_rounded),
+            label: Text(
+              _controller.isSubmitting ? 'Saving…' : 'Mark delivered',
+            ),
+          ),
       ],
     );
   }
