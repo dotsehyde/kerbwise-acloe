@@ -1,34 +1,81 @@
 import 'package:flutter/foundation.dart';
 
 import '../core/utils/gbp.dart';
+import '../models/completion_record.dart';
 import '../models/delivery.dart';
+import '../services/completion_queue.dart';
 import '../services/courier_api.dart';
 
 class DeliveryDetailController extends ChangeNotifier {
   DeliveryDetailController({
     required this._api,
+    required this._queue,
     required this._id,
     required this._onChange,
-  });
+    required this._summary,
+  }) {
+    _queue.addListener(_queueChanged);
+  }
 
   final CourierApi _api;
+  final CompletionQueue _queue;
   final int _id;
   final ValueChanged<Delivery> _onChange;
+  final Delivery? _summary;
 
   DeliveryDetails? _details;
   bool _isLoading = false;
   bool _isUnavailable = false;
+  bool _isCached = false;
   bool _isSubmitting = false;
+  bool _reportedConfirmation = false;
   String? _cashError;
+  String? _dismissedCashErrorKey;
   String? _submitError;
   bool _disposed = false;
 
-  DeliveryDetails? get details => _details;
+  DeliveryDetails? get details {
+    final deliveryDetails = _details;
+    if (deliveryDetails == null) return null;
+    if (_queue.isConfirmed(_id)) {
+      return deliveryDetails.copyWith(
+        delivery: deliveryDetails.delivery.asDelivered(),
+      );
+    }
+    final expected = _correctionAmount;
+    return expected == null
+        ? deliveryDetails
+        : deliveryDetails.copyWith(cashDue: expected);
+  }
+
+  DateTime? get serverNow => _api.serverNow;
+  CompletionRecord? get completion => _queue.recordFor(_id);
+  bool get isConfirmed => _queue.isConfirmed(_id);
   bool get isLoading => _isLoading;
   bool get isUnavailable => _isUnavailable;
+  bool get isCached => _isCached;
   bool get isSubmitting => _isSubmitting;
-  String? get cashError => _cashError;
   String? get submitError => _submitError;
+
+  int? get _correctionAmount => _details?.delivery.cashOnDelivery == true
+      ? completion?.expectedCashPence
+      : null;
+
+  String? get cashError {
+    if (_cashError != null) return _cashError;
+    final expected = _correctionAmount;
+    return expected != null && completion?.key != _dismissedCashErrorKey
+        ? _cashMismatchMessage(expected)
+        : null;
+  }
+
+  bool get canMarkDelivered {
+    final current = details;
+    return current != null &&
+        current.delivery.canComplete &&
+        current.hasVerifiedPayment &&
+        (completion == null || _correctionAmount != null);
+  }
 
   Future<void> loadDelivery() async {
     if (_isLoading || _disposed) return;
@@ -37,43 +84,53 @@ class DeliveryDetailController extends ChangeNotifier {
 
     DeliveryDetails? details;
     var unavailable = false;
+    var useCache = false;
     try {
       details = await _api.fetchDelivery(_id);
     } on CourierApiException catch (error) {
       unavailable = error.statusCode == 404;
+      useCache = error.statusCode >= 500 || error.statusCode == 429;
     } catch (_) {
-      // A connection or response error can be retried from the detail page.
+      useCache = true;
     }
     if (_disposed) return;
 
-    _details = details;
+    _details = details ?? (useCache ? _offlineDetails() : null);
+    _isCached = details == null && _details != null;
     _isUnavailable = unavailable;
     _isLoading = false;
-    notifyListeners();
-
     if (details != null) _onChange(details.delivery);
+    _queueChanged();
+  }
+
+  DeliveryDetails? _offlineDetails() {
+    final cached = _api.cachedDetails(_id);
+    final summary = _summary;
+    if (summary == null) return cached;
+    if (cached == null) return DeliveryDetails.fromSummary(summary);
+    if (cached.delivery.cashOnDelivery != summary.cashOnDelivery ||
+        cached.delivery.orderTotal != summary.orderTotal ||
+        cached.delivery.canComplete != summary.canComplete) {
+      return DeliveryDetails(delivery: summary, cashDue: null, notes: '');
+    }
+    return cached;
   }
 
   void clearCashError() {
-    if (_disposed || _cashError == null) return;
+    if (cashError == null) return;
     _cashError = null;
+    _dismissedCashErrorKey = completion?.key;
     notifyListeners();
   }
 
   Future<void> markDelivered(String cashInput) async {
-    final details = _details;
-    if (_disposed ||
-        _isSubmitting ||
-        details == null ||
-        details.delivery.isDelivered) {
-      return;
-    }
-
-    final cashPence = details.delivery.cashOnDelivery
+    if (_disposed || _isSubmitting || !canMarkDelivered) return;
+    final current = details!;
+    final cashPence = current.delivery.cashOnDelivery == true
         ? parseCashPence(cashInput)
         : 0;
-    if (cashPence == null || cashPence != details.cashDue) {
-      _cashError = _cashMismatchMessage(details.cashDue);
+    if (cashPence == null || cashPence != current.cashDue) {
+      _cashError = _cashMismatchMessage(current.cashDue!);
       _submitError = null;
       notifyListeners();
       return;
@@ -84,38 +141,27 @@ class DeliveryDetailController extends ChangeNotifier {
     _submitError = null;
     notifyListeners();
 
-    Delivery? delivered;
     try {
-      await _api.complete(_id, cashPence: cashPence);
-      if (_disposed) return;
-      delivered = details.delivery.asDelivered();
-      _details = details.copyWith(delivery: delivered);
-    } on CourierApiException catch (error) {
-      if (_disposed) return;
-      final expected = error.expectedCashPence;
-      if (expected != null && details.delivery.cashOnDelivery) {
-        _details = details.copyWith(cashDue: expected);
-        _cashError = _cashMismatchMessage(expected);
-      } else {
-        _submitError = switch (error.statusCode) {
-          404 => 'This delivery is no longer available.',
-          409 => 'This delivery has changed. Go back and reopen it.',
-          429 => 'Too many requests. Wait a moment and try again.',
-          _ => 'Couldn’t save this delivery. Try again.',
-        };
-      }
+      await _queue.enqueue(_id, cashPence);
     } catch (_) {
-      if (_disposed) return;
       _submitError =
-          'Couldn’t confirm delivery. Check your signal and try again.';
+          'Couldn’t save this handover on your phone. Try again before leaving.';
     } finally {
       if (!_disposed) {
         _isSubmitting = false;
         notifyListeners();
       }
     }
+  }
 
-    if (delivered != null) _onChange(delivered);
+  void _queueChanged() {
+    if (_disposed) return;
+    if (details case final DeliveryDetails confirmed
+        when !_reportedConfirmation && isConfirmed) {
+      _reportedConfirmation = true;
+      _onChange(confirmed.delivery);
+    }
+    notifyListeners();
   }
 
   String _cashMismatchMessage(int due) =>
@@ -124,6 +170,7 @@ class DeliveryDetailController extends ChangeNotifier {
   @override
   void dispose() {
     _disposed = true;
+    _queue.removeListener(_queueChanged);
     super.dispose();
   }
 }

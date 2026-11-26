@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import '../controllers/home_controller.dart';
@@ -5,14 +7,17 @@ import '../core/shared/screen_message.dart';
 import '../core/theme/courier_theme.dart';
 import '../core/utils/gbp.dart';
 import '../core/utils/london_time.dart';
+import '../models/completion_record.dart';
 import '../models/delivery.dart';
+import '../services/completion_queue.dart';
 import '../services/courier_api.dart';
 import 'delivery_detail_screen.dart';
 
 class HomeScreen extends StatefulWidget {
-  const HomeScreen({super.key, required this.api});
+  const HomeScreen({super.key, required this.api, required this.queue});
 
   final CourierApi api;
+  final CompletionQueue queue;
 
   @override
   State<HomeScreen> createState() => _HomeScreenState();
@@ -34,7 +39,7 @@ class _HomeScreenState extends State<HomeScreen> {
     super.dispose();
   }
 
-  Future<void> _openDelivery(Delivery delivery) async {
+  Future<void> _openDelivery(int id, {Delivery? summary}) async {
     if (_openingDelivery) return;
     _openingDelivery = true;
     try {
@@ -42,7 +47,9 @@ class _HomeScreenState extends State<HomeScreen> {
         MaterialPageRoute(
           builder: (_) => DeliveryDetailScreen(
             api: widget.api,
-            id: delivery.id,
+            queue: widget.queue,
+            id: id,
+            summary: summary,
             onChange: _controller.updateDelivery,
           ),
         ),
@@ -54,7 +61,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
   @override
   Widget build(BuildContext context) => ListenableBuilder(
-    listenable: _controller,
+    listenable: Listenable.merge([_controller, widget.queue]),
     builder: (_, _) => _buildScreen(),
   );
 
@@ -88,66 +95,173 @@ class _HomeScreenState extends State<HomeScreen> {
         IconButton(
           icon: const Icon(Icons.refresh_rounded),
           tooltip: 'Refresh deliveries',
-          onPressed: _controller.isLoading ? null : _controller.loadDeliveries,
+          onPressed: _controller.isLoading ? null : _refresh,
         ),
         const SizedBox(width: 8),
       ],
     ),
-    body: SafeArea(top: false, child: _buildBody()),
+    body: SafeArea(
+      top: false,
+      child: Column(
+        children: [
+          _buildQueueSummary(),
+          Expanded(child: _buildBody()),
+        ],
+      ),
+    ),
+  );
+
+  void _refresh() {
+    unawaited(widget.queue.sync());
+    unawaited(_controller.loadDeliveries());
+  }
+
+  Widget _buildQueueSummary() {
+    final pending = widget.queue.records
+        .where((record) => !record.needsReview)
+        .length;
+    final review = widget.queue.records.length - pending;
+    final labels = [
+      if (pending > 0) '$pending waiting to sync',
+      if (review > 0) '$review need review',
+      if (widget.queue.storageError) 'Saved handovers could not be opened',
+    ];
+    if (labels.isEmpty) return const SizedBox.shrink();
+    return Semantics(
+      liveRegion: true,
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(16, 8, 16, 2),
+        child: Text(
+          labels.join(' · '),
+          style: const TextStyle(fontWeight: FontWeight.w700),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildOrphanRecord(CompletionRecord record) => ListTile(
+    title: Text('Delivery #${record.id}'),
+    subtitle: Text(record.needsReview ? 'Needs review' : 'Waiting to sync'),
+    trailing: const Icon(Icons.chevron_right),
+    onTap: () => _openDelivery(record.id),
   );
 
   Widget _buildBody() {
-    if (_controller.isLoading) {
-      return const Center(
-        child: CircularProgressIndicator(semanticsLabel: 'Loading deliveries'),
-      );
-    }
-
     final deliveries = _controller.deliveries;
-    if (deliveries == null) {
-      return ScreenMessage(
-        icon: Icons.cloud_off_outlined,
-        title: 'Couldn’t load deliveries',
-        description: 'Check your connection and try again.',
-        retry: _controller.loadDeliveries,
+    final deliveryIds = deliveries?.map((delivery) => delivery.id).toSet();
+    final orphans = widget.queue.records
+        .where((record) => deliveryIds?.contains(record.id) != true)
+        .toList();
+    if (deliveries == null || deliveries.isEmpty) {
+      final status = deliveries == null
+          ? _controller.isLoading
+                ? const Center(
+                    child: CircularProgressIndicator(
+                      semanticsLabel: 'Loading deliveries',
+                    ),
+                  )
+                : ScreenMessage(
+                    icon: Icons.cloud_off_outlined,
+                    title: 'Couldn’t load deliveries',
+                    description: 'Check your connection and try again.',
+                    retry: _refresh,
+                  )
+          : ScreenMessage(
+              icon: Icons.inventory_2_outlined,
+              title: 'No deliveries today',
+              retry: _refresh,
+            );
+      if (orphans.isEmpty) return status;
+      return Column(
+        children: [
+          Expanded(child: status),
+          Flexible(
+            child: ListView.builder(
+              shrinkWrap: true,
+              itemCount: orphans.length,
+              itemBuilder: (_, index) => _buildOrphanRecord(orphans[index]),
+            ),
+          ),
+        ],
       );
     }
 
-    if (deliveries.isEmpty) {
-      return ScreenMessage(
-        icon: Icons.inventory_2_outlined,
-        title: 'No deliveries today',
-        retry: _controller.loadDeliveries,
-      );
+    final routeDate = _controller.routeDate;
+    final day = routeDate == null ? null : londonDay(routeDate);
+    final today = <Delivery>[];
+    final earlier = <Delivery>[];
+    final upcoming = <Delivery>[];
+    final unscheduled = <Delivery>[];
+    for (final delivery in deliveries) {
+      final due = delivery.scheduledAt;
+      if (day == null) {
+        today.add(delivery);
+      } else if (due == null) {
+        unscheduled.add(delivery);
+      } else {
+        final dueDay = londonDay(due);
+        if (dueDay < day) {
+          earlier.add(delivery);
+        } else if (dueDay > day) {
+          upcoming.add(delivery);
+        } else {
+          today.add(delivery);
+        }
+      }
     }
+    final deliveredCount = today.where(_isDelivered).length;
+    final rows = <Object>[
+      if (_controller.refreshFailed)
+        const Padding(
+          padding: EdgeInsets.only(bottom: 12),
+          child: Text('Couldn’t refresh. Showing the last loaded deliveries.'),
+        ),
+      _RouteSummary(delivered: deliveredCount, total: today.length),
+      ...today,
+      if (earlier.isNotEmpty) ...['Earlier deliveries', ...earlier],
+      if (upcoming.isNotEmpty) ...['Upcoming deliveries', ...upcoming],
+      if (unscheduled.isNotEmpty) ...[
+        'Deliveries without a due time',
+        ...unscheduled,
+      ],
+      for (final record in orphans) _buildOrphanRecord(record),
+    ];
 
-    final deliveredCount = deliveries
-        .where((delivery) => delivery.isDelivered)
-        .length;
     return ListView.builder(
       padding: const EdgeInsets.fromLTRB(16, 12, 16, 20),
-      itemCount: deliveries.length + 1,
+      itemCount: rows.length,
       itemBuilder: (context, index) {
-        if (index == 0) {
-          return Padding(
-            padding: const EdgeInsets.only(bottom: 16),
-            child: _RouteSummary(
-              delivered: deliveredCount,
-              total: deliveries.length,
-            ),
-          );
-        }
-        final delivery = deliveries[index - 1];
+        final row = rows[index];
         return Padding(
           padding: const EdgeInsets.only(bottom: 8),
-          child: _DeliveryTile(
-            delivery: delivery,
-            onTap: () => _openDelivery(delivery),
-          ),
+          child: switch (row) {
+            final Delivery delivery => _DeliveryTile(
+              delivery: delivery,
+              delivered: _isDelivered(delivery),
+              completion: widget.queue.recordFor(delivery.id),
+              showDate: day != null && !today.contains(delivery),
+              onTap: () => _openDelivery(delivery.id, summary: delivery),
+            ),
+            final String heading => Padding(
+              padding: const EdgeInsets.symmetric(vertical: 8),
+              child: Semantics(
+                header: true,
+                child: Text(
+                  heading,
+                  style: Theme.of(context).textTheme.titleMedium,
+                ),
+              ),
+            ),
+            _ => row as Widget,
+          },
         );
       },
     );
   }
+
+  bool _isDelivered(Delivery delivery) =>
+      widget.queue.recordFor(delivery.id) == null &&
+      (delivery.isDelivered || widget.queue.isConfirmed(delivery.id));
 }
 
 class _RouteSummary extends StatelessWidget {
@@ -191,7 +305,7 @@ class _RouteSummary extends StatelessWidget {
         const SizedBox(height: 12),
         ExcludeSemantics(
           child: LinearProgressIndicator(
-            value: delivered / total,
+            value: total == 0 ? 0 : delivered / total,
             minHeight: 6,
             color: lime,
             backgroundColor: const Color(0xFF577360),
@@ -204,10 +318,40 @@ class _RouteSummary extends StatelessWidget {
 }
 
 class _DeliveryTile extends StatelessWidget {
-  const _DeliveryTile({required this.delivery, required this.onTap});
+  const _DeliveryTile({
+    required this.delivery,
+    required this.delivered,
+    required this.completion,
+    required this.showDate,
+    required this.onTap,
+  });
 
   final Delivery delivery;
+  final bool delivered;
+  final CompletionRecord? completion;
+  final bool showDate;
   final VoidCallback onTap;
+
+  String get _timeLabel {
+    final time = delivery.scheduledAt;
+    if (time == null) return 'Time unavailable';
+    return showDate
+        ? '${londonDate(time)} · ${londonTime(time)}'
+        : londonTime(time);
+  }
+
+  String get _statusLabel {
+    if (completion case final CompletionRecord record) {
+      return record.needsReview ? 'Needs review' : 'Waiting to sync';
+    }
+    if (delivered) return 'Delivered';
+    if (!delivery.canComplete) return delivery.status.label;
+    return switch ((delivery.cashOnDelivery, delivery.orderTotal)) {
+      (true, final int amount) => '${formatGbp(amount)} cash',
+      (false, _) => 'Paid online',
+      _ => 'Payment unavailable',
+    };
+  }
 
   @override
   Widget build(BuildContext context) => Material(
@@ -227,11 +371,11 @@ class _DeliveryTile extends StatelessWidget {
               width: 40,
               height: 40,
               decoration: BoxDecoration(
-                color: delivery.isDelivered ? softGreen : canvas,
+                color: delivered ? softGreen : canvas,
                 borderRadius: BorderRadius.circular(11),
               ),
               child: Icon(
-                delivery.isDelivered ? Icons.check : Icons.inventory_2_outlined,
+                delivered ? Icons.check : Icons.inventory_2_outlined,
                 color: forest,
                 size: 20,
               ),
@@ -259,30 +403,19 @@ class _DeliveryTile extends StatelessWidget {
                     runSpacing: 2,
                     children: [
                       Text(
-                        londonTime(delivery.scheduledAt),
+                        _timeLabel,
                         style: const TextStyle(
                           color: mutedInk,
                           fontWeight: FontWeight.w600,
                         ),
                       ),
-                      if (delivery.isDelivered)
-                        const Text(
-                          'Delivered',
-                          style: TextStyle(
-                            color: forest,
-                            fontWeight: FontWeight.w700,
-                          ),
-                        )
-                      else if (delivery.cashOnDelivery)
-                        Text(
-                          '${formatGbp(delivery.orderTotal)} cash',
-                          style: const TextStyle(fontWeight: FontWeight.w700),
-                        )
-                      else
-                        const Text(
-                          'Paid online',
-                          style: TextStyle(color: mutedInk),
+                      Text(
+                        _statusLabel,
+                        style: TextStyle(
+                          color: delivered ? forest : ink,
+                          fontWeight: FontWeight.w700,
                         ),
+                      ),
                     ],
                   ),
                 ],

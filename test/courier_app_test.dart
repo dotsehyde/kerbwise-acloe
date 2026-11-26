@@ -6,9 +6,12 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:kerbwise_courier/core/theme/courier_theme.dart';
+import 'package:kerbwise_courier/models/completion_record.dart';
 import 'package:kerbwise_courier/models/delivery.dart';
 import 'package:kerbwise_courier/pages/delivery_detail_screen.dart';
 import 'package:kerbwise_courier/pages/home_screen.dart';
+import 'package:kerbwise_courier/services/completion_queue.dart';
+import 'package:kerbwise_courier/services/completion_store.dart';
 import 'package:kerbwise_courier/services/courier_api.dart';
 
 void main() {
@@ -90,8 +93,8 @@ void main() {
     await tester.pump();
 
     expect(requests, 1);
-    final saving = find.widgetWithText(FilledButton, 'Saving…');
-    expect(tester.widget<FilledButton>(saving).onPressed, isNull);
+    expect(find.text('Saved on this phone. Waiting to sync.'), findsOneWidget);
+    expect(markDelivered, findsNothing);
 
     pending.complete(_completed());
     await tester.pumpAndSettle();
@@ -140,7 +143,7 @@ void main() {
     tester,
   ) async {
     final keys = <String?>[];
-    await _openDelivery(
+    final queue = await _openDelivery(
       tester,
       cash: false,
       onComplete: (request) async {
@@ -152,13 +155,10 @@ void main() {
 
     await tester.tap(markDelivered);
     await tester.pumpAndSettle();
-    expect(
-      find.text('Couldn’t confirm delivery. Check your signal and try again.'),
-      findsOneWidget,
-    );
+    expect(find.text('Saved on this phone. Waiting to sync.'), findsOneWidget);
     expect(find.text('Delivery completed'), findsNothing);
 
-    await tester.tap(markDelivered);
+    await queue.sync();
     await tester.pumpAndSettle();
     expect(keys, hasLength(2));
     expect(keys.first, isNotEmpty);
@@ -191,7 +191,7 @@ void main() {
       });
     });
 
-    await tester.pumpWidget(_app(HomeScreen(api: api)));
+    await tester.pumpWidget(_app(HomeScreen(api: api, queue: _queueFor(api))));
     await tester.pumpAndSettle();
 
     expect(seen, [null, '25', '50']);
@@ -229,7 +229,7 @@ void main() {
       return _response({'items': [], 'next': null});
     });
 
-    await tester.pumpWidget(_app(HomeScreen(api: api)));
+    await tester.pumpWidget(_app(HomeScreen(api: api, queue: _queueFor(api))));
     expect(find.byType(CircularProgressIndicator), findsOneWidget);
     pending.complete(_response({}, 503));
     await tester.pumpAndSettle();
@@ -252,7 +252,14 @@ void main() {
     });
 
     await tester.pumpWidget(
-      _app(DeliveryDetailScreen(api: api, id: 11, onChange: changes.add)),
+      _app(
+        DeliveryDetailScreen(
+          api: api,
+          queue: _queueFor(api),
+          id: 11,
+          onChange: changes.add,
+        ),
+      ),
     );
     expect(find.byType(CircularProgressIndicator), findsOneWidget);
     pending.complete(_response({}, 503));
@@ -267,9 +274,95 @@ void main() {
     expect(find.text('11 Test Street'), findsOneWidget);
     expect(markDelivered, findsOneWidget);
   });
+
+  testWidgets('Keeps the route usable during an outage with mixed real data', (
+    tester,
+  ) async {
+    var offline = false;
+    final api = _mockApi((request) async {
+      if (offline) throw http.ClientException('Connection lost');
+      expect(request.url.path, '/deliveries');
+      if (request.url.queryParameters.containsKey('after')) {
+        return _response({
+          'items': [
+            _delivery(11, cash: true)..addAll({
+              'phone': null,
+              'amount': '12.30',
+              'scheduledAt': '2026-07-03T13:05:00',
+            }),
+            _delivery(13, cash: true)..addAll({
+              'status': 'failed',
+              'scheduledAt': '2026-07-04T09:00:00Z',
+            }),
+          ],
+          'next': null,
+        });
+      }
+      return _response({
+        'items': [
+          _delivery(11, cash: true),
+          _delivery(12, cash: false)..['scheduledAt'] = '2026-07-02T13:05:00Z',
+        ],
+        'next': 'next page',
+      });
+    });
+    await tester.pumpWidget(_app(HomeScreen(api: api, queue: _queueFor(api))));
+    await tester.pumpAndSettle();
+    expect(find.text('0 of 1 delivered'), findsOneWidget);
+    expect(find.text('Customer 11'), findsOneWidget);
+    expect(find.text('Earlier deliveries'), findsOneWidget);
+    expect(find.text('Upcoming deliveries'), findsOneWidget);
+
+    offline = true;
+    await tester.tap(find.byTooltip('Refresh deliveries'));
+    await tester.pumpAndSettle();
+    expect(
+      find.textContaining('Showing the last loaded deliveries'),
+      findsOneWidget,
+    );
+    await tester.tap(find.text('Customer 11'));
+    await tester.pumpAndSettle();
+    expect(find.text('Due 13:05 London time'), findsOneWidget);
+    expect(find.text('Customer phone number unavailable'), findsOneWidget);
+    await tester.enterText(find.byType(TextField), '12.30');
+    await tester.tap(markDelivered);
+    await tester.pumpAndSettle();
+    expect(find.text('Saved on this phone. Waiting to sync.'), findsOneWidget);
+  });
+
+  testWidgets('Conflicting cached payment details block offline completion', (
+    tester,
+  ) async {
+    var offline = false;
+    final api = _mockApi((request) async {
+      if (offline) throw http.ClientException('Connection lost');
+      return _response(_delivery(11, cash: true));
+    });
+    await api.fetchDelivery(11);
+    offline = true;
+
+    await tester.pumpWidget(
+      _app(
+        DeliveryDetailScreen(
+          api: api,
+          queue: _queueFor(api),
+          id: 11,
+          summary: Delivery.fromJson(_delivery(11, cash: false)),
+          onChange: (_) {},
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('11 Test Street'), findsOneWidget);
+    expect(
+      find.text('Payment could not be verified. Contact the office.'),
+      findsOneWidget,
+    );
+    expect(markDelivered, findsNothing);
+  });
 }
 
-Future<void> _openDelivery(
+Future<CompletionQueue> _openDelivery(
   WidgetTester tester, {
   required bool cash,
   required Future<http.Response> Function(http.Request) onComplete,
@@ -279,11 +372,40 @@ Future<void> _openDelivery(
     if (request.method == 'POST') return onComplete(request);
     return _response(_delivery(11, cash: cash));
   });
+  final queue = _queueFor(api);
 
   await tester.pumpWidget(
-    _app(DeliveryDetailScreen(api: api, id: 11, onChange: onChange ?? (_) {})),
+    _app(
+      DeliveryDetailScreen(
+        api: api,
+        queue: queue,
+        id: 11,
+        onChange: onChange ?? (_) {},
+      ),
+    ),
   );
   await tester.pumpAndSettle();
+  return queue;
+}
+
+CompletionQueue _queueFor(CourierApi api) {
+  final queue = CompletionQueue(api, _MemoryCompletionStore());
+  addTearDown(queue.dispose);
+  return queue;
+}
+
+class _MemoryCompletionStore implements CompletionStore {
+  final _records = <int, CompletionRecord>{};
+
+  @override
+  Future<List<CompletionRecord>> readAll() async => _records.values.toList();
+
+  @override
+  Future<void> write(CompletionRecord record) async =>
+      _records[record.id] = record;
+
+  @override
+  Future<void> remove(int id) async => _records.remove(id);
 }
 
 CourierApi _mockApi(Future<http.Response> Function(http.Request) handler) {
@@ -319,5 +441,8 @@ http.Response _response(Map<String, dynamic> body, [int status = 200]) =>
     http.Response(
       jsonEncode(body),
       status,
-      headers: {'Content-Type': 'application/json; charset=utf-8'},
+      headers: {
+        'Content-Type': 'application/json; charset=utf-8',
+        'date': 'Fri, 03 Jul 2026 10:00:00 GMT',
+      },
     );

@@ -1,4 +1,7 @@
-int poundsToPence(num pounds) => (pounds * 100).round();
+int? poundsToPence(Object? pounds) => switch (pounds) {
+  num() || String() => parseCashPence(pounds.toString()),
+  _ => null,
+};
 
 String formatGbp(int pence) =>
     '£${pence ~/ 100}.${(pence % 100).toString().padLeft(2, '0')}';

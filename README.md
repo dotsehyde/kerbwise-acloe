@@ -52,12 +52,20 @@ Replace `PHONE_ID` with the connected phone’s ID. Keep the USB connection acti
 
 ## Check the courier flow
 
+Use the calm API for this walkthrough.
+
 - The list should show 60 deliveries. Scroll to the bottom to find Oscar Reid, delivery #60.
 - Open George Novak, delivery #7, to see the address and cash due. **Call customer** opens the Android dialer with the number filled in. Enter `262.49` and tap **Mark delivered** to see the cash validation, then enter `262.50` to complete it.
 - Open Farah Bennett, delivery #6. **Mark delivered** records the handover without a cash entry. Return to the list to see the updated status and count.
-- Stop the API and tap **Refresh deliveries** to check the connection error. Restart it and tap **Try again**.
+- Stop the API and tap **Refresh deliveries** to see the last loaded route. Restart the API and refresh again.
 
-The list uses the API’s run for today and displays due times in London time. Completion needs a connection in Step 1. If a request loses its response, tapping **Mark delivered** again in the same app session reuses the idempotency key for the same amount. Customer details are held in memory during use.
+## Try real conditions
+
+Stop the calm server and run `node courier-server.js --real`. Refresh the app to load the busy-day route. Due times use London time, and earlier and upcoming deliveries appear in separate sections.
+
+Open a delivery from the loaded route, stop the server, then tap **Mark delivered** with the exact amount for a cash delivery. The app shows **Saved on this phone. Waiting to sync.** Restart the server in real mode and return to the app. The pending handover retries automatically with the original amount and key. **Refresh deliveries** also checks for pending handovers. The mock resets its server-side data on each restart.
+
+Saved handovers survive an app restart. Customer names, addresses, phone numbers, and notes are held in memory, so a cold start without a connection shows saved handovers by delivery ID until the route reloads. The [Step 2 decisions](DECISIONS.md) explain the retry and cash-handling tradeoffs.
 
 ## Project structure
 
@@ -65,22 +73,14 @@ The Flutter app follows Model–View–Controller (MVC).
 
 ```text
 lib/
-├── main.dart                            # App entry point and API configuration
-├── models/
-│   └── delivery.dart                    # Delivery data and JSON parsing
-├── pages/
-│   ├── home_screen.dart                 # Today’s list and delivery progress
-│   └── delivery_detail_screen.dart      # Address, customer call, and handover
-├── controllers/
-│   ├── home_controller.dart             # List loading and delivery status updates
-│   └── delivery_detail_controller.dart  # Detail loading, cash validation, and completion
-├── services/
-│   ├── courier_api.dart                 # HTTP requests, pagination, and idempotency
-│   └── customer_dialer.dart             # Opens the Android dialer
-└── core/
-    ├── theme/                           # Colors and Material theme
-    ├── shared/                          # Reusable screen messages
-    └── utils/                           # GBP and London time formatting
+├── models/       # Delivery and handover data
+├── pages/        # Home and delivery detail screens
+├── controllers/  # Loading, cash validation, and completion state
+├── services/     # Courier API, handover queue, and Android dialer
+└── core/         # Shared app code
+    ├── theme/    # Colors and Material theme
+    ├── shared/   # Reusable screen messages
+    └── utils/    # GBP and London time formatting
 ```
 
 The pages rebuild when their controllers publish state changes. When the API confirms a handover, the detail page reports the updated delivery to the home controller, which updates the row and progress count.
@@ -94,4 +94,4 @@ flutter analyze
 flutter test
 ```
 
-The [widget tests](test/courier_app_test.dart) cover pagination, cash and prepaid completion, duplicate taps, and retry behavior. They use a mock HTTP client, so the server and emulator can stay off for these checks.
+The [widget tests](test/courier_app_test.dart) cover pagination, cash and prepaid completion, duplicate taps, and a lost connection. The [queue tests](test/completion_queue_test.dart) cover restart recovery, rate limiting, terminal conflicts, and local write failures. These checks use a mock HTTP client and can run with the server and emulator stopped.
